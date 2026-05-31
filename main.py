@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 
 from database import get_db, engine
 from models import Base
-from services.usaspending_service import USASpendingService
-from services.cache_service import CacheService
+from usaspending_service import USASpendingService
+from cache_service import CacheService
 from schemas import ContractResponse, GrantResponse, AgencyResponse
 
 # Load environment variables
