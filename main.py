@@ -1,15 +1,26 @@
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import os
+import logging
+import time
+import uuid
 from dotenv import load_dotenv
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 from database import get_db, engine
 from models import Base
-from services.usaspending_service import USASpendingService
-from services.cache_service import CacheService
 from schemas import ContractResponse, GrantResponse, AgencyResponse
+from usaspending_service import USASpendingService
+from cache_service import CacheService
 
 # Load environment variables
 load_dotenv()
@@ -29,11 +40,57 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET"],  # Only allow GET for API
     allow_headers=["*"],
 )
+
+# Security middleware
+app.add_middleware(
+    TrustedHostMiddleware, 
+    allowed_hosts=[
+        os.getenv("ALLOWED_HOSTS", "*").split(",")
+    ]
+)
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    
+    # Add request_id to logging context
+    old_factory = logging.getLogRecordFactory()
+    def record_factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        record.request_id = request_id
+        return record
+    logging.setLogRecordFactory(record_factory)
+    
+    start_time = time.time()
+    logger.info(f"Request started: {request.method} {request.url}")
+    
+    try:
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        logger.info(f"Request completed: {response.status_code} in {process_time:.3f}s")
+        
+        # Add security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY" 
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        return response
+    except Exception as e:
+        process_time = time.time() - start_time
+        logger.error(f"Request failed: {str(e)} after {process_time:.3f}s")
+        raise
+    finally:
+        logging.setLogRecordFactory(old_factory)
 
 # Initialize services
 usaspending_service = USASpendingService()
@@ -52,6 +109,66 @@ async def root():
             "agencies": "/agencies"
         }
     }
+
+@app.get("/health")
+async def health_check():
+    """Comprehensive health check endpoint for Railway deployment monitoring"""
+    try:
+        health_status = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "services": {},
+            "version": "1.0.0"
+        }
+        
+        # Test database connection
+        try:
+            from database import engine
+            with engine.connect() as conn:
+                conn.execute("SELECT 1")
+            health_status["services"]["database"] = "connected"
+        except Exception as e:
+            health_status["services"]["database"] = f"error: {str(e)}"
+            health_status["status"] = "degraded"
+        
+        # Test cache service
+        try:
+            test_key = f"health_test_{int(time.time())}"
+            cache_service.set(test_key, "ok", ttl=60)
+            cache_result = cache_service.get(test_key)
+            cache_service.delete(test_key)  # Cleanup
+            
+            if cache_result == "ok":
+                health_status["services"]["cache"] = "working"
+            else:
+                health_status["services"]["cache"] = "warning"
+        except Exception as e:
+            health_status["services"]["cache"] = f"error: {str(e)}"
+            health_status["status"] = "degraded"
+        
+        # Test USASpending API connection
+        try:
+            # Simple connectivity test to external API
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get("https://api.usaspending.gov/api/v2/")
+                if response.status_code == 200:
+                    health_status["services"]["usaspending_api"] = "connected"
+                else:
+                    health_status["services"]["usaspending_api"] = f"status_code: {response.status_code}"
+        except Exception as e:
+            health_status["services"]["usaspending_api"] = f"error: {str(e)}"
+            health_status["status"] = "degraded"
+        
+        # Determine overall health
+        if health_status["status"] == "degraded":
+            return HTTPException(status_code=503, detail=health_status)
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
 
 @app.get("/contracts", response_model=List[ContractResponse])
 async def get_contracts(
