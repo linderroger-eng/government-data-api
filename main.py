@@ -40,20 +40,16 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        os.getenv("ALLOWED_ORIGINS", "*").split(",")
-    ],
-    allow_credentials=True,
-    allow_methods=["GET"],  # Only allow GET for API
+    allow_origins=["*"],  # Allow all origins for dashboard access
+    allow_credentials=False,  # Set to False when using allow_origins=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Security middleware
+# Security middleware  
 app.add_middleware(
     TrustedHostMiddleware, 
-    allowed_hosts=[
-        os.getenv("ALLOWED_HOSTS", "*").split(",")
-    ]
+    allowed_hosts=["*"]  # Allow all hosts for simplicity
 )
 
 # Request logging middleware
