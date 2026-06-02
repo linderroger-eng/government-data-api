@@ -1,9 +1,13 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from typing import Optional
 import os
 import httpx
 import logging
+import json
+from pathlib import Path
+from datetime import datetime, timezone
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -252,6 +256,49 @@ async def get_agencies(
     except Exception as e:
         logger.error(f"Agencies error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+NEWSLETTER_FILE = Path(__file__).parent / "newsletter_posts.json"
+
+def get_posts():
+    if NEWSLETTER_FILE.exists():
+        return json.loads(NEWSLETTER_FILE.read_text())
+    return [{
+        "title": "Polymarket Edge: How to Read Market Signals Before the Crowd",
+        "preview": "The 3 patterns that consistently predict market moves on Polymarket",
+        "content": "<h1>Polymarket Edge: How to Read Market Signals Before the Crowd</h1><p>Most Polymarket traders react to news. The edge is in anticipating it.</p><h2>The 3 Patterns That Work</h2><p><strong>1. Volume Spike Before Price Move</strong><br>When trading volume on a market spikes 3x+ without a price move, a big move is coming.</p><p><strong>2. Bid-Ask Spread Compression</strong><br>When spreads tighten dramatically, market makers are confident in the outcome.</p><p><strong>3. Late Resolution Drift</strong><br>Markets close to resolution date with prices far from 0 or 100 often drift fast in the final 48 hours.</p><p>Stay sharp,<br><strong>Polymarket Edge</strong></p>",
+        "slug": "market-signals-before-the-crowd",
+        "pub_date": "Mon, 02 Jun 2026 17:00:00 +0000"
+    }]
+
+@app.get("/newsletter/feed.xml", include_in_schema=False)
+async def rss_feed():
+    """RSS feed for Polymarket Edge Newsletter — auto-imported by Beehiiv"""
+    posts = get_posts()
+    items = ""
+    for post in posts:
+        items += f"""
+    <item>
+      <title><![CDATA[{post['title']}]]></title>
+      <link>https://government-data-api.onrender.com/newsletter/{post['slug']}</link>
+      <guid>https://government-data-api.onrender.com/newsletter/{post['slug']}</guid>
+      <pubDate>{post['pub_date']}</pubDate>
+      <description><![CDATA[{post['preview']}]]></description>
+      <content:encoded><![CDATA[{post['content']}]]></content:encoded>
+    </item>"""
+
+    rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Polymarket Edge Newsletter</title>
+    <link>https://government-data-api.onrender.com/newsletter</link>
+    <description>Trading signals, market analysis, and Polymarket edge strategies</description>
+    <language>en-us</language>
+    <atom:link href="https://government-data-api.onrender.com/newsletter/feed.xml" rel="self" type="application/rss+xml"/>
+    {items}
+  </channel>
+</rss>"""
+    return Response(content=rss, media_type="application/rss+xml")
 
 
 if __name__ == "__main__":
