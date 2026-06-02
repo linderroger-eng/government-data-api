@@ -41,6 +41,10 @@ async def root():
         }
     }
 
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
 @app.get("/health")
 async def health():
     try:
