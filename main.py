@@ -234,9 +234,11 @@ async def get_agencies(
         for a in agencies:
             results.append({
                 "agency_code": a.get("toptier_code", ""),
-                "name": a.get("name", ""),
+                "name": a.get("agency_name", ""),
                 "abbreviation": a.get("abbreviation", ""),
                 "active_fy": a.get("active_fy", ""),
+                "budget_authority_amount": a.get("budget_authority_amount", 0),
+                "obligated_amount": a.get("obligated_amount", 0),
             })
 
         return {
