@@ -26,7 +26,7 @@ app.add_middleware(
 
 USASPENDING_BASE = "https://api.usaspending.gov/api/v2"
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
         "message": "Government Contracts & Grants API",
