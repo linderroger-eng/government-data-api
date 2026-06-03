@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from typing import Optional
@@ -6,16 +6,100 @@ import os
 import httpx
 import logging
 import json
+import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime, timezone
+from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# API Key + Rate Limiting
+# ---------------------------------------------------------------------------
+
+DB_PATH = Path(__file__).parent / "api_keys.db"
+
+TIER_LIMITS = {
+    "free":       100,
+    "startup":   10_000,
+    "business":  100_000,
+    "enterprise": None,   # unlimited
+}
+
+# In-memory rate-limit counters: {api_key: {"count": N, "window_start": epoch}}
+_rate_counters: dict = defaultdict(lambda: {"count": 0, "window_start": time.time()})
+
+def _get_db():
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            key        TEXT PRIMARY KEY,
+            tier       TEXT NOT NULL DEFAULT 'free',
+            owner      TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+    return conn
+
+def _seed_free_key(key: str):
+    """Auto-register unknown keys as free tier (frictionless onboarding)."""
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO api_keys (key, tier, owner) VALUES (?, 'free', 'self-registered')",
+            (key,)
+        )
+
+def _lookup_key(key: str):
+    with _get_db() as conn:
+        row = conn.execute("SELECT * FROM api_keys WHERE key = ?", (key,)).fetchone()
+    return row
+
+def validate_api_key(request: Request):
+    """FastAPI dependency — validates X-API-Key header and enforces rate limits."""
+    api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+
+    # No key → free tier, limited
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="API key required. Add header: X-API-Key: <your-key>. Get a free key at https://rapidapi.com/search/government-contracts"
+        )
+
+    row = _lookup_key(api_key)
+    if not row:
+        # Auto-register as free tier for frictionless onboarding
+        _seed_free_key(api_key)
+        row = _lookup_key(api_key)
+
+    tier = row["tier"]
+    daily_limit = TIER_LIMITS.get(tier)
+
+    if daily_limit is not None:
+        now = time.time()
+        counter = _rate_counters[api_key]
+        # Reset counter if 24-hour window has elapsed
+        if now - counter["window_start"] > 86_400:
+            counter["count"] = 0
+            counter["window_start"] = now
+        counter["count"] += 1
+        if counter["count"] > daily_limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded for {tier} tier ({daily_limit:,} req/day). Upgrade at https://rapidapi.com/search/government-contracts"
+            )
+
+    return {"key": api_key, "tier": tier}
+
+# ---------------------------------------------------------------------------
+
 app = FastAPI(
     title="Government Contracts & Grants API",
     description="Real-time access to US Government contracts, grants, and agency spending data from USASpending.gov",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -53,7 +137,7 @@ async def ping():
 async def health():
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{USASPENDING_BASE}/")
+            r = await client.get(f"{USASPENDING_BASE}/references/toptier_agencies/?limit=1")
             upstream = "ok" if r.status_code == 200 else f"status {r.status_code}"
     except Exception as e:
         upstream = f"error: {str(e)}"
@@ -65,7 +149,8 @@ async def get_contracts(
     amount_min: Optional[float] = Query(None, description="Minimum award amount in USD"),
     amount_max: Optional[float] = Query(None, description="Maximum award amount in USD"),
     keyword: Optional[str] = Query(None, description="Keyword search in contract description"),
-    limit: int = Query(10, ge=1, le=100, description="Number of results (max 100)")
+    limit: int = Query(10, ge=1, le=100, description="Number of results (max 100)"),
+    auth: dict = Depends(validate_api_key)
 ):
     """
     Fetch real US government contracts from USASpending.gov.
@@ -149,7 +234,8 @@ async def get_grants(
     agency: Optional[str] = Query(None, description="Filter by awarding agency name"),
     amount_min: Optional[float] = Query(None, description="Minimum grant amount in USD"),
     keyword: Optional[str] = Query(None, description="Keyword search in grant description"),
-    limit: int = Query(10, ge=1, le=100, description="Number of results (max 100)")
+    limit: int = Query(10, ge=1, le=100, description="Number of results (max 100)"),
+    auth: dict = Depends(validate_api_key)
 ):
     """
     Fetch real US government grants from USASpending.gov.
@@ -221,7 +307,8 @@ async def get_grants(
 
 @app.get("/agencies")
 async def get_agencies(
-    limit: int = Query(50, ge=1, le=100, description="Number of agencies to return")
+    limit: int = Query(50, ge=1, le=100, description="Number of agencies to return"),
+    auth: dict = Depends(validate_api_key)
 ):
     """
     Fetch list of US government agencies from USASpending.gov.
